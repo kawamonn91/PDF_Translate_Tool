@@ -1,5 +1,7 @@
 package com.kawamonn.pdfjatranslator
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
@@ -11,6 +13,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +28,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -43,26 +47,37 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+
+    private val incomingUri = mutableStateOf<Uri?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        incomingUri.value = pdfUriFrom(intent)
         setContent {
             MaterialTheme {
-                PdfScreen()
+                PdfScreen(incomingUri.value)
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        pdfUriFrom(intent)?.let { incomingUri.value = it }
+    }
+
+    private fun pdfUriFrom(intent: Intent?): Uri? =
+        if (intent?.action == Intent.ACTION_VIEW) intent.data else null
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PdfScreen() {
+private fun PdfScreen(incoming: Uri?) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var document by remember { mutableStateOf<MupdfDocument?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    fun openUri(uri: Uri) {
         scope.launch {
             runCatching {
                 val path = withContext(Dispatchers.IO) { copyToCache(context, uri) }
@@ -75,6 +90,14 @@ private fun PdfScreen() {
                 error = e.message ?: "PDFを開けませんでした"
             }
         }
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) openUri(uri)
+    }
+
+    LaunchedEffect(incoming) {
+        incoming?.let { openUri(it) }
     }
 
     Scaffold(topBar = { TopAppBar(title = { Text("PDF日本語化ツール") }) }) { padding ->
@@ -97,7 +120,7 @@ private fun PdfScreen() {
 private fun PageList(document: MupdfDocument) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+        contentPadding = PaddingValues(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         items(document.pageCount) { index ->
@@ -125,7 +148,7 @@ private fun PageImage(document: MupdfDocument, index: Int) {
     }
 }
 
-private fun copyToCache(context: android.content.Context, uri: Uri): String {
+private fun copyToCache(context: Context, uri: Uri): String {
     val target = File(context.cacheDir, "input.pdf")
     context.contentResolver.openInputStream(uri)?.use { input ->
         target.outputStream().use { input.copyTo(it) }

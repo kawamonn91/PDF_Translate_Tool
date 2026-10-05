@@ -37,6 +37,20 @@ class MupdfDocument private constructor(private val doc: Document) : AutoCloseab
         }
     }
 
+    suspend fun paragraphs(index: Int): List<Paragraph> = withContext(mupdf) {
+        val page = doc.loadPage(0, index)
+        try {
+            val text = page.toStructuredText()
+            try {
+                buildParagraphs(index, text)
+            } finally {
+                text.destroy()
+            }
+        } finally {
+            page.destroy()
+        }
+    }
+
     override fun close() {
         doc.destroy()
     }
