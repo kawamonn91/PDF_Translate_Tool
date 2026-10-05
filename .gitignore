@@ -20,3 +20,5 @@ sample_*
 *.tmp
 exe_run.log
 apikey_dialog.png
+dist-cache/
+build_portable.log
