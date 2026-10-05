@@ -9,15 +9,29 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * MuPDF の文書。MuPDF は同時に呼ぶと壊れるため、すべての呼び出しを1本のスレッドに集める。
+ * MuPDF の呼び出しを1本のスレッドに集める。MuPDF は同時に呼ぶと壊れるため、
+ * 表示・抽出・書き出しのすべてがこのスレッドを使う。
  */
-class MupdfDocument private constructor(private val doc: Document) : AutoCloseable {
+object MupdfThread {
+    val dispatcher = Dispatchers.IO.limitedParallelism(1)
+}
 
-    private val mupdf = Dispatchers.IO.limitedParallelism(1)
+/** MuPDF の文書。すべての呼び出しは [MupdfThread] で行う */
+class MupdfDocument private constructor(private val doc: Document) : AutoCloseable {
 
     val pageCount: Int = doc.countPages()
 
-    suspend fun renderPage(index: Int, scale: Float): Bitmap = withContext(mupdf) {
+    suspend fun pageSize(index: Int): Pair<Float, Float> = withContext(MupdfThread.dispatcher) {
+        val page = doc.loadPage(0, index)
+        try {
+            val bounds = page.bounds
+            (bounds.x1 - bounds.x0) to (bounds.y1 - bounds.y0)
+        } finally {
+            page.destroy()
+        }
+    }
+
+    suspend fun renderPage(index: Int, scale: Float): Bitmap = withContext(MupdfThread.dispatcher) {
         val page = doc.loadPage(0, index)
         try {
             val pixmap = page.toPixmap(Matrix(scale, scale), ColorSpace.DeviceRGB, false, true)
@@ -37,7 +51,7 @@ class MupdfDocument private constructor(private val doc: Document) : AutoCloseab
         }
     }
 
-    suspend fun paragraphs(index: Int): List<Paragraph> = withContext(mupdf) {
+    suspend fun paragraphs(index: Int): List<Paragraph> = withContext(MupdfThread.dispatcher) {
         val page = doc.loadPage(0, index)
         try {
             val text = page.toStructuredText()
@@ -56,6 +70,8 @@ class MupdfDocument private constructor(private val doc: Document) : AutoCloseab
     }
 
     companion object {
-        fun open(path: String): MupdfDocument = MupdfDocument(Document.openDocument(path))
+        suspend fun open(path: String): MupdfDocument = withContext(MupdfThread.dispatcher) {
+            MupdfDocument(Document.openDocument(path))
+        }
     }
 }
