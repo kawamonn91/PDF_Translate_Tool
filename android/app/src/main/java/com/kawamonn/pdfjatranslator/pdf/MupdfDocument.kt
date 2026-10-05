@@ -17,7 +17,7 @@ object MupdfThread {
 }
 
 /** MuPDF の文書。すべての呼び出しは [MupdfThread] で行う */
-class MupdfDocument private constructor(private val doc: Document) : AutoCloseable {
+class MupdfDocument private constructor(private val doc: Document, val path: String) : AutoCloseable {
 
     val pageCount: Int = doc.countPages()
 
@@ -71,7 +71,7 @@ class MupdfDocument private constructor(private val doc: Document) : AutoCloseab
 
     companion object {
         suspend fun open(path: String): MupdfDocument = withContext(MupdfThread.dispatcher) {
-            MupdfDocument(Document.openDocument(path))
+            MupdfDocument(Document.openDocument(path), path)
         }
     }
 }

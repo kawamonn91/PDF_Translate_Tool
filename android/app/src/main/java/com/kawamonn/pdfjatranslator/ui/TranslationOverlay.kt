@@ -1,6 +1,7 @@
 package com.kawamonn.pdfjatranslator.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,9 +20,11 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.roundToInt
 
-/** 翻訳済みの段落。座標はページの pt 単位 */
+/**
+ * 翻訳済みの段落。座標はページの pt 単位。
+ * [scale] は利用者が調整した文字の大きさの倍率(1 が自動の大きさ)
+ */
 data class TranslatedParagraph(
     val left: Float,
     val top: Float,
@@ -29,41 +32,44 @@ data class TranslatedParagraph(
     val bottom: Float,
     val fontSize: Float,
     val ja: String,
+    val scale: Float = 1f,
 )
 
 private const val MIN_FONT_SP = 5f
 
 /**
  * 元の段落の位置に、訳文を白い下地つきで重ねて表示する。
- * 文字は枠に収まるまで小さくする(自動調整)。
+ * 文字は枠に収まるまで小さくする(自動調整)。タップすると [onParagraphClick] に段落の番号を渡す。
  */
 @Composable
 fun TranslationOverlay(
     paragraphs: List<TranslatedParagraph>,
     pageWidthPt: Float,
+    onParagraphClick: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
         val dpPerPt = maxWidth.value / pageWidthPt
         val density = LocalDensity.current
         val measurer = rememberTextMeasurer()
-        paragraphs.forEach { item ->
+        paragraphs.forEachIndexed { index, item ->
             val widthDp = (item.right - item.left) * dpPerPt
             val heightDp = (item.bottom - item.top) * dpPerPt
-            val fittedSp = remember(item.ja, widthDp, heightDp, item.fontSize, dpPerPt) {
+            val fittedSp = remember(item.ja, widthDp, heightDp, item.fontSize, item.scale, dpPerPt) {
                 fitFontSize(
                     measurer = measurer,
                     text = item.ja,
                     maxWidthPx = with(density) { widthDp.dp.roundToPx() },
                     maxHeightPx = with(density) { heightDp.dp.roundToPx() },
-                    startSp = item.fontSize * dpPerPt,
+                    startSp = item.fontSize * item.scale * dpPerPt,
                 )
             }
             Box(
                 modifier = Modifier
                     .offset(x = (item.left * dpPerPt).dp, y = (item.top * dpPerPt).dp)
                     .size(width = widthDp.dp, height = heightDp.dp)
-                    .background(Color.White),
+                    .background(Color.White)
+                    .clickable { onParagraphClick(index) },
             ) {
                 Text(
                     text = item.ja,

@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -36,19 +37,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.kawamonn.pdfjatranslator.export.PdfExporter
-import com.kawamonn.pdfjatranslator.export.drawTranslations
+import com.kawamonn.pdfjatranslator.export.PdfTextExporter
 import com.kawamonn.pdfjatranslator.pdf.MupdfDocument
 import com.kawamonn.pdfjatranslator.pdf.copyToCache
-import java.io.File
 import com.kawamonn.pdfjatranslator.settings.ApiKeyStore
 import com.kawamonn.pdfjatranslator.translate.ClaudeTranslator
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** ページ画像の解像度(1pt あたりのピクセル数) */
 private const val RENDER_SCALE = 2f
+
+/** 調整中の段落。ページ番号と段落の並び順で指す */
+private data class EditTarget(val page: Int, val index: Int)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -63,12 +66,13 @@ fun PdfScreen(incoming: Uri?) {
     var translations by remember { mutableStateOf<Map<Int, List<TranslatedParagraph>>>(emptyMap()) }
     var translating by remember { mutableStateOf(false) }
     var showKeyDialog by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<EditTarget?>(null) }
 
     fun openUri(uri: Uri) {
         scope.launch {
             runCatching {
                 val path = withContext(Dispatchers.IO) { copyToCache(context, uri) }
-                withContext(Dispatchers.IO) { MupdfDocument.open(path) }
+                MupdfDocument.open(path)
             }.onSuccess { opened ->
                 document?.close()
                 document = opened
@@ -102,7 +106,7 @@ fun PdfScreen(incoming: Uri?) {
                     }
                     translations = result.toMap()
                 }
-                status = "翻訳が終わりました(${result.values.sumOf { it.size }} 件)"
+                status = "翻訳が終わりました(${result.values.sumOf { it.size }} 件)。訳文をタップすると直せます"
             }.onFailure { e ->
                 status = "翻訳できませんでした: ${e.message ?: "原因不明のエラー"}"
             }
@@ -120,6 +124,13 @@ fun PdfScreen(incoming: Uri?) {
         }
     }
 
+    fun updateParagraph(target: EditTarget, ja: String, scale: Float) {
+        val list = translations[target.page] ?: return
+        translations = translations + (target.page to list.mapIndexed { i, p ->
+            if (i == target.index) p.copy(ja = ja, scale = scale) else p
+        })
+    }
+
     fun exportTo(uri: Uri) {
         val doc = document ?: return
         val snapshot = translations
@@ -127,19 +138,8 @@ fun PdfScreen(incoming: Uri?) {
         status = "書き出しています…"
         scope.launch {
             runCatching {
-                val exporter = PdfExporter()
-                for (index in 0 until doc.pageCount) {
-                    status = "書き出し中 ${index + 1} / ${doc.pageCount} ページ"
-                    val (widthPt, heightPt) = doc.pageSize(index)
-                    val bitmap = doc.renderPage(index, RENDER_SCALE)
-                    withContext(Dispatchers.Default) {
-                        drawTranslations(bitmap, snapshot[index].orEmpty(), widthPt)
-                    }
-                    exporter.addPage(bitmap, widthPt, heightPt)
-                    bitmap.recycle()
-                }
-                val temp = File(context.cacheDir, "translated.pdf")
-                exporter.saveTo(temp)
+                val temp = File(context.filesDir, "translated.pdf")
+                PdfTextExporter(doc.path).exportTo(temp, snapshot)
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openOutputStream(uri)?.use { out ->
                         temp.inputStream().use { it.copyTo(out) }
@@ -175,6 +175,19 @@ fun PdfScreen(incoming: Uri?) {
         )
     }
 
+    editing?.let { target ->
+        translations[target.page]?.getOrNull(target.index)?.let { paragraph ->
+            ParagraphEditDialog(
+                paragraph = paragraph,
+                onDismiss = { editing = null },
+                onSave = { ja, scale ->
+                    updateParagraph(target, ja, scale)
+                    editing = null
+                },
+            )
+        }
+    }
+
     Scaffold(topBar = { TopAppBar(title = { Text("PDF日本語化ツール") }) }) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             Row(
@@ -195,7 +208,7 @@ fun PdfScreen(incoming: Uri?) {
                     Text("APIキー")
                 }
                 Button(
-                    enabled = document != null && !translating,
+                    enabled = document != null && translations.isNotEmpty() && !translating,
                     onClick = { exportLauncher.launch("translated.pdf") },
                 ) {
                     Text("書き出し")
@@ -205,30 +218,39 @@ fun PdfScreen(incoming: Uri?) {
                 Text(it, modifier = Modifier.padding(horizontal = 16.dp))
             }
             error?.let {
-                Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp))
+                Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp))
             }
             document?.let { doc ->
-                PageList(doc, translations)
+                PageList(doc, translations, onParagraphClick = { page, index -> editing = EditTarget(page, index) })
             }
         }
     }
 }
 
 @Composable
-private fun PageList(document: MupdfDocument, translations: Map<Int, List<TranslatedParagraph>>) {
+private fun PageList(
+    document: MupdfDocument,
+    translations: Map<Int, List<TranslatedParagraph>>,
+    onParagraphClick: (page: Int, index: Int) -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         items(document.pageCount) { index ->
-            PageImage(document, index, translations[index].orEmpty())
+            PageImage(document, index, translations[index].orEmpty(), onParagraphClick)
         }
     }
 }
 
 @Composable
-private fun PageImage(document: MupdfDocument, index: Int, paragraphs: List<TranslatedParagraph>) {
+private fun PageImage(
+    document: MupdfDocument,
+    index: Int,
+    paragraphs: List<TranslatedParagraph>,
+    onParagraphClick: (page: Int, index: Int) -> Unit,
+) {
     val bitmap by produceState<Bitmap?>(initialValue = null, document, index) {
         value = document.renderPage(index, RENDER_SCALE)
     }
@@ -244,6 +266,7 @@ private fun PageImage(document: MupdfDocument, index: Int, paragraphs: List<Tran
                 TranslationOverlay(
                     paragraphs = paragraphs,
                     pageWidthPt = current.width / RENDER_SCALE,
+                    onParagraphClick = { paragraphIndex -> onParagraphClick(index, paragraphIndex) },
                     modifier = Modifier.matchParentSize(),
                 )
             }
