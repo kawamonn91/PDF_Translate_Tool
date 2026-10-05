@@ -1,0 +1,13 @@
+build/
+.gradle/
+.idea/
+local.properties
+keystore.properties
+*.jks
+*.keystore
+third_party/mupdf-*/
+app/src/main/java/com/artifex/
+app/src/main/jniLibs/
+third_party/*.tar.gz
+*.log
+*.err
