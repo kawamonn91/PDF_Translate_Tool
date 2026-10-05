@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pymupdf as fitz
-from PySide6.QtCore import QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QImage, QKeySequence, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -46,7 +46,13 @@ from .translate import ClaudeTranslator
 
 RENDER_SCALE = 2.0  # プレビューの解像度(pt → ピクセルの倍率)
 ALIGN_LABELS = {"left": "左揃え", "center": "中央揃え", "right": "右揃え"}
-FILE_FILTER = "PDF / PowerPoint (*.pdf *.pptx)"
+FILE_FILTERS = ";;".join(
+    [
+        "対応ファイル (*.pdf *.pptx)",
+        "PDF (*.pdf)",
+        "PowerPoint (*.pptx)",
+    ]
+)
 
 
 class Job(QThread):
@@ -179,8 +185,15 @@ class ApiKeyDialog(QDialog):
         self._refresh_status()
 
 
+PAGE_GAP = 24.0  # ページの間の余白(シーン上の px)
+
+
 class PageView(QGraphicsView):
+    """全ページを縦に並べて表示する。見えているページだけ、画像を作って表示する"""
+
     unitClicked = Signal(str)
+    pageNeeded = Signal(int)
+    currentPageChanged = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -188,31 +201,122 @@ class PageView(QGraphicsView):
         self.setScene(self._scene)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setBackgroundBrush(QColor("#e9ecef"))
-        self._overlays: dict[str, QGraphicsRectItem] = {}
+        self._pages: list[dict] = []
+        self._selected: str | None = None
+        self._fitted = False
+        self._requested: set[int] = set()
+        self._current = -1
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
-    def show_image(self, image: QImage, boxes: dict[str, tuple[float, float, float, float]], warnings: set[str]) -> None:
+    def set_pages(self, sizes: list[tuple[float, float]]) -> None:
+        keep = self.verticalScrollBar().value()
         self._scene.clear()
-        self._overlays = {}
-        pix = QPixmap.fromImage(image)
-        self._scene.addPixmap(pix)
-        self._scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
+        self._pages = []
+        self._requested = set()
+        y = 0.0
+        for width, height in sizes:
+            pw, ph = width * RENDER_SCALE, height * RENDER_SCALE
+            self._pages.append({"y": y, "w": pw, "h": ph, "items": []})
+            y += ph + PAGE_GAP
+        total_width = max((p["w"] for p in self._pages), default=1.0)
+        self._scene.setSceneRect(QRectF(0, 0, total_width, max(y - PAGE_GAP, 1.0)))
+        if not self._fitted and self._pages:
+            self.resetTransform()
+            factor = max(self.viewport().width() - 40, 100) / total_width
+            self.scale(factor, factor)
+            self._fitted = True
+        self.verticalScrollBar().setValue(keep)
+        self._request_visible()
+
+    def set_page_image(self, index: int, image: QImage, boxes: dict[str, tuple[float, float, float, float]], warnings: set[str]) -> None:
+        if index >= len(self._pages):
+            return
+        page = self._pages[index]
+        for item in page["items"]:
+            self._scene.removeItem(item)
+        page["items"] = []
+        pix_item = self._scene.addPixmap(QPixmap.fromImage(image))
+        pix_item.setPos(0, page["y"])
+        pix_item.setZValue(0)
+        page["items"].append(pix_item)
         for unit_id, (x0, y0, x1, y1) in boxes.items():
-            rect = QRectF(x0 * RENDER_SCALE, y0 * RENDER_SCALE, (x1 - x0) * RENDER_SCALE, (y1 - y0) * RENDER_SCALE)
+            rect = QRectF(x0 * RENDER_SCALE, page["y"] + y0 * RENDER_SCALE, (x1 - x0) * RENDER_SCALE, (y1 - y0) * RENDER_SCALE)
             item = self._scene.addRect(rect, QPen(QColor("#d9480f" if unit_id in warnings else "#1c7ed6"), 1.5))
-            item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
             item.setData(0, unit_id)
             item.setToolTip(unit_id)
-            self._overlays[unit_id] = item
-        self.resetTransform()
-        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            item.setZValue(1)
+            page["items"].append(item)
+        self._requested.discard(index)
+        self._apply_highlight()
+
+    def clear_images(self) -> None:
+        for page in self._pages:
+            for item in page["items"]:
+                self._scene.removeItem(item)
+            page["items"] = []
+        self._requested = set()
+        self._request_visible()
 
     def highlight(self, unit_id: str | None) -> None:
-        for uid, item in self._overlays.items():
-            selected = uid == unit_id
-            item.setBrush(QBrush(QColor(28, 126, 214, 60)) if selected else QBrush(Qt.BrushStyle.NoBrush))
-            item.setPen(QPen(QColor("#1c7ed6"), 2.5 if selected else 1.5))
-        if unit_id in self._overlays:
-            self.ensureVisible(self._overlays[unit_id], 80, 80)
+        self._selected = unit_id
+        self._apply_highlight()
+        for page in self._pages:
+            for item in page["items"]:
+                if unit_id and item.data(0) == unit_id:
+                    self.ensureVisible(item.rect(), 80, 80)
+                    return
+
+    def scroll_to_page(self, index: int) -> None:
+        if 0 <= index < len(self._pages):
+            offset = self.mapFromScene(QPointF(0, self._pages[index]["y"])).y()
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + offset)
+
+    def page_count(self) -> int:
+        return len(self._pages)
+
+    def _apply_highlight(self) -> None:
+        for page in self._pages:
+            for item in page["items"]:
+                unit_id = item.data(0)
+                if unit_id is None:
+                    continue
+                selected = unit_id == self._selected
+                item.setBrush(QBrush(QColor(28, 126, 214, 60)) if selected else QBrush(Qt.BrushStyle.NoBrush))
+                item.setPen(QPen(QColor("#1c7ed6"), 2.5 if selected else 1.5))
+
+    def _visible_pages(self) -> list[int]:
+        rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        margin = rect.height() * 0.5
+        top, bottom = rect.top() - margin, rect.bottom() + margin
+        return [i for i, p in enumerate(self._pages) if p["y"] <= bottom and p["y"] + p["h"] >= top]
+
+    def _request_visible(self) -> None:
+        for index in self._visible_pages():
+            if not self._pages[index]["items"] and index not in self._requested:
+                self._requested.add(index)
+                self.pageNeeded.emit(index)
+
+    def _page_at_center(self) -> int:
+        if not self._pages:
+            return -1
+        y = self.mapToScene(self.viewport().rect().center()).y()
+        index = 0
+        for i, page in enumerate(self._pages):
+            if page["y"] <= y:
+                index = i
+        return index
+
+    def _on_scroll(self, _value: int) -> None:
+        self._request_visible()
+        current = self._page_at_center()
+        if current >= 0 and current != self._current:
+            self._current = current
+            self.currentPageChanged.emit(current)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._request_visible()
 
     def mouseReleaseEvent(self, event) -> None:
         super().mouseReleaseEvent(event)
@@ -226,7 +330,9 @@ class PageView(QGraphicsView):
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.scale(1.15 if event.angleDelta().y() > 0 else 1 / 1.15, 1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
+            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.scale(factor, factor)
+            self._request_visible()
             event.accept()
             return
         super().wheelEvent(event)
@@ -242,6 +348,7 @@ class MainWindow(QMainWindow):
         self.selected_id: str | None = None
         self._jobs: list[Job] = []
         self._pptx_preview: Path | None = None
+        self._preview_doc: fitz.Document | None = None
         self._loading = False
 
         self._render_timer = QTimer(self)
@@ -259,6 +366,8 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.view = PageView()
         self.view.unitClicked.connect(self.select_unit)
+        self.view.pageNeeded.connect(self._on_page_needed)
+        self.view.currentPageChanged.connect(self._on_view_page_changed)
 
         nav = QHBoxLayout()
         self.prev_btn = QPushButton("◀")
@@ -390,7 +499,7 @@ class MainWindow(QMainWindow):
         self.next_btn.setEnabled(loaded)
 
     def open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "文書を開く", "", FILE_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "文書を開く", "", FILE_FILTERS)
         if not path:
             return
         try:
@@ -492,12 +601,8 @@ class MainWindow(QMainWindow):
         unit_id = self.table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
         self.selected_id = unit_id
         unit = self.project.unit(unit_id)
-        if self.project.kind == "pdf" and unit.location["page"] != self.page_index:
-            self.page_index = unit.location["page"]
-            self.refresh_preview()
-        elif self.project.kind == "pptx" and unit.location["slide"] != self.page_index:
-            self.page_index = unit.location["slide"]
-            self.refresh_preview()
+        target = unit.location["page"] if self.project.kind == "pdf" else unit.location["slide"]
+        self.view.scroll_to_page(target)
         self._show_editor(unit)
         self.view.highlight(unit_id)
 
@@ -590,19 +695,9 @@ class MainWindow(QMainWindow):
     def go_page(self, step: int) -> None:
         if self.project is None:
             return
-        pages = self._page_count()
-        target = min(max(self.page_index + step, 0), pages - 1)
-        if target != self.page_index:
-            self.page_index = target
-            self.refresh_preview()
-
-    def _page_count(self) -> int:
-        if self.project is None:
-            return 0
-        if self.project.kind == "pdf":
-            with fitz.open(self.project.source) as doc:
-                return doc.page_count
-        return _pptx_slide_count(self.project.source)
+        total = self.view.page_count()
+        target = min(max(self.page_index + step, 0), total - 1)
+        self.view.scroll_to_page(target)
 
     def force_refresh(self) -> None:
         self._pptx_preview = None
@@ -611,25 +706,42 @@ class MainWindow(QMainWindow):
     def refresh_preview(self) -> None:
         if self.project is None:
             return
-        self.page_label.setText(f"{self.page_index + 1} / {self._page_count()}")
         if self.project.kind == "pdf":
-            self._show_pdf_preview()
+            self._show_document(pdf_engine.render(self.project.source, self.project.units))
         else:
             self._show_pptx_preview()
 
-    def _show_pdf_preview(self) -> None:
+    def _show_document(self, doc: fitz.Document) -> None:
+        if self._preview_doc is not None:
+            self._preview_doc.close()
+        self._preview_doc = doc
+        self.view.set_pages([(page.rect.width, page.rect.height) for page in doc])
+        self._update_page_label()
+
+    def _update_page_label(self) -> None:
+        total = self.view.page_count()
+        self.page_label.setText(f"{self.page_index + 1} / {total}" if total else "ページ -")
+
+    def _on_view_page_changed(self, index: int) -> None:
+        self.page_index = index
+        self._update_page_label()
+
+    def _on_page_needed(self, index: int) -> None:
+        if self._preview_doc is None or self.project is None:
+            return
         project = self.project
-        page_no = self.page_index
-        doc = pdf_engine.render(project.source, project.units)
-        try:
-            page = doc[page_no]
-            pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE), alpha=False)
-            image = QImage(bytes(pix.samples), pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
-        finally:
-            doc.close()
-        boxes = {u.id: u.bbox for u in project.units if u.location["page"] == page_no}
-        self.view.show_image(image, boxes, set(project.warnings()))
-        self.view.highlight(self.selected_id)
+        page = self._preview_doc[index]
+        pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE), alpha=False)
+        image = QImage(bytes(pix.samples), pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+        if project.kind == "pdf":
+            boxes = {u.id: u.bbox for u in project.units if u.location["page"] == index}
+        else:
+            boxes = {
+                u.id: (u.extra["rect"][0], u.extra["rect"][1], u.extra["rect"][0] + u.extra["rect"][2], u.extra["rect"][1] + u.extra["rect"][3])
+                for u in project.units
+                if u.location["slide"] == index
+            }
+        self.view.set_page_image(index, image, boxes, set(project.warnings()))
 
     def _show_pptx_preview(self) -> None:
         if self._pptx_preview is None or not self._pptx_preview.exists():
@@ -644,28 +756,12 @@ class MainWindow(QMainWindow):
 
             self._run(work, self._on_pptx_preview_ready)
             return
-        self._draw_pptx_page()
+        self._show_document(fitz.open(self._pptx_preview))
 
     def _on_pptx_preview_ready(self, pdf_path: Path) -> None:
         self._pptx_preview = pdf_path
         self._busy(False, "プレビューを更新しました")
-        self._draw_pptx_page()
-
-    def _draw_pptx_page(self) -> None:
-        project = self.project
-        if project is None or self._pptx_preview is None:
-            return
-        with fitz.open(self._pptx_preview) as doc:
-            page = doc[min(self.page_index, doc.page_count - 1)]
-            pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE), alpha=False)
-            image = QImage(bytes(pix.samples), pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
-        boxes = {
-            u.id: (u.extra["rect"][0], u.extra["rect"][1], u.extra["rect"][0] + u.extra["rect"][2], u.extra["rect"][1] + u.extra["rect"][3])
-            for u in project.units
-            if u.location["slide"] == self.page_index
-        }
-        self.view.show_image(image, boxes, set(project.warnings()))
-        self.view.highlight(self.selected_id)
+        self._show_document(fitz.open(pdf_path))
 
     # ---------- 作業中の表示・非同期 ----------
 
@@ -704,12 +800,6 @@ class MainWindow(QMainWindow):
 def _short(text: str, limit: int = 60) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
-
-
-def _pptx_slide_count(path: Path) -> int:
-    from pptx import Presentation
-
-    return len(Presentation(str(path)).slides)
 
 
 def run() -> int:
