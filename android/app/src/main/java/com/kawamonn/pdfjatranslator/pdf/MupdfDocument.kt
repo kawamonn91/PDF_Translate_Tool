@@ -20,7 +20,7 @@ class MupdfDocument private constructor(private val doc: Document) : AutoCloseab
     suspend fun renderPage(index: Int, scale: Float): Bitmap = withContext(mupdf) {
         val page = doc.loadPage(0, index)
         try {
-            val pixmap = page.toPixmap(Matrix(scale, scale), ColorSpace.getDeviceRgb(), false, true)
+            val pixmap = page.toPixmap(Matrix(scale, scale), ColorSpace.DeviceRGB, false, true)
             try {
                 val png = pixmap.asPNG()
                 try {
