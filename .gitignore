@@ -18,3 +18,5 @@ gui_check*
 *_preview.pdf
 sample_*
 *.tmp
+exe_run.log
+apikey_dialog.png
