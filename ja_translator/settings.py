@@ -49,20 +49,33 @@ def delete_api_key() -> None:
         pass
 
 
+def _server_detail(error) -> str:
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        inner = body.get("error")
+        if isinstance(inner, dict) and inner.get("message"):
+            return str(inner["message"])
+    return str(getattr(error, "message", "") or error)
+
+
+def _with_detail(message: str, error) -> str:
+    return f"{message}\n\n[Claude API の表示] {_server_detail(error)}"
+
+
 def verify_api_key(key: str) -> None:
-    """キーで Claude API に問い合わせ、使えるかを確かめる。使えなければ利用者向けの理由を付けて例外にする"""
+    """キーで Claude API に問い合わせ、使えるかを確かめる。使えなければ理由を付けて ValueError にする"""
     import anthropic
 
     client = anthropic.Anthropic(api_key=key.strip(), timeout=20.0)
     try:
         client.models.list(limit=1)
     except anthropic.AuthenticationError as e:
-        raise ValueError("キーが正しくありません。コピーし直して、もう一度お試しください") from e
+        raise ValueError(_with_detail("キーが正しくありません。コピーし直して、もう一度お試しください。", e)) from e
     except anthropic.PermissionDeniedError as e:
-        raise ValueError("このキーでは利用が許可されていません。Anthropic Console でキーの権限を確認してください") from e
+        raise ValueError(_with_detail("このキーでは利用が許可されていません。Anthropic Console でキーの種類と権限を確認してください。", e)) from e
     except anthropic.RateLimitError as e:
-        raise ValueError("利用回数の上限に達しています。しばらく待ってから、もう一度お試しください") from e
+        raise ValueError(_with_detail("利用回数の上限に達しています。しばらく待ってから、もう一度お試しください。", e)) from e
     except anthropic.APIConnectionError as e:
         raise ValueError("インターネットに接続できませんでした。接続を確認してください") from e
     except anthropic.APIStatusError as e:
-        raise ValueError(f"Claude API からエラーが返りました(コード {e.status_code})。しばらくしてから、もう一度お試しください") from e
+        raise ValueError(_with_detail(f"Claude API がエラーを返しました(コード {e.status_code})。", e)) from e

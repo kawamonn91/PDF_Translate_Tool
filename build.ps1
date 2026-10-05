@@ -1,7 +1,7 @@
 # Windows 用の配布フォルダを作る: dist\PDF-JA-Translator\PDF-JA-Translator.exe
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
-& .\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --name PDF-JA-Translator `
+& .\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --name PDF-JA-Translator --hidden-import keyring.backends.Windows `
     --exclude-module PySide6.QtWebEngineCore `
     --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtWebChannel `
