@@ -39,6 +39,8 @@ Set-Content -Path $pth.FullName -Encoding ASCII -Value @(
     "..\lib\pywin32_system32"
 )
 
+Set-Content -Path (Join-Path $out "start.bat") -Encoding ASCII -Value @('@echo off', 'start "" "%~dp0python\pythonw.exe" "%~dp0app\main.py"')
+
 $zip = Join-Path $root "dist\PDF-JA-Translator-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 & "$env:SystemRoot\System32\tar.exe" -a -c -f $zip -C (Join-Path $root "dist") PDF-JA-Translator
