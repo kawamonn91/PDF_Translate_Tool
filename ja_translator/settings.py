@@ -35,11 +35,17 @@ def key_source() -> str | None:
     return "stored" if get_api_key() else None
 
 
-def save_api_key(key: str) -> None:
+def check_key_format(key: str) -> None:
     value = key.strip()
+    if value.startswith("sk-ant-admin"):
+        raise ValueError("これは管理用(Admin)キーです。翻訳には、通常の API キーが必要です")
     if not value.startswith("sk-ant-"):
         raise ValueError("Claude API キーは sk-ant- で始まります。コピーが正しいか確認してください")
-    _keyring().set_password(SERVICE, ACCOUNT, value)
+
+
+def save_api_key(key: str) -> None:
+    check_key_format(key)
+    _keyring().set_password(SERVICE, ACCOUNT, key.strip())
 
 
 def delete_api_key() -> None:
@@ -65,6 +71,7 @@ def _with_detail(message: str, error) -> str:
 def verify_api_key(key: str) -> None:
     """キーで Claude API に問い合わせ、使えるかを確かめる。使えなければ理由を付けて ValueError にする"""
     import anthropic
+    check_key_format(key)
 
     client = anthropic.Anthropic(api_key=key.strip(), timeout=20.0)
     try:

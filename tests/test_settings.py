@@ -28,15 +28,15 @@ def keyring_store(monkeypatch):
 
 
 def test_environment_variable_takes_priority(keyring_store, monkeypatch):
-    keyring_store.set_password(settings.SERVICE, settings.ACCOUNT, "sk-ant-stored")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-env")
-    assert settings.get_api_key() == "sk-ant-from-env"
+    keyring_store.set_password(settings.SERVICE, settings.ACCOUNT, "sk-ant-api03-stored")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-from-env")
+    assert settings.get_api_key() == "sk-ant-api03-from-env"
     assert settings.key_source() == "env"
 
 
 def test_saved_key_is_used_when_no_environment_variable(keyring_store):
-    settings.save_api_key("  sk-ant-saved  ")
-    assert settings.get_api_key() == "sk-ant-saved"
+    settings.save_api_key("  sk-ant-api03-saved  ")
+    assert settings.get_api_key() == "sk-ant-api03-saved"
     assert settings.key_source() == "stored"
 
 
@@ -47,7 +47,7 @@ def test_key_without_the_expected_prefix_is_rejected(keyring_store):
 
 
 def test_deleting_the_saved_key(keyring_store):
-    settings.save_api_key("sk-ant-saved")
+    settings.save_api_key("sk-ant-api03-saved")
     settings.delete_api_key()
     assert settings.get_api_key() is None
     assert settings.key_source() is None
@@ -69,7 +69,7 @@ def test_wrong_key_gets_a_plain_japanese_message(monkeypatch):
 
     monkeypatch.setattr(anthropic, "Anthropic", Client)
     with pytest.raises(ValueError, match="キーが正しくありません"):
-        settings.verify_api_key("sk-ant-wrong")
+        settings.verify_api_key("sk-ant-api03-wrong")
 
 
 def test_valid_key_passes_the_connection_test(monkeypatch):
@@ -81,4 +81,22 @@ def test_valid_key_passes_the_connection_test(monkeypatch):
             return []
 
     monkeypatch.setattr(anthropic, "Anthropic", Client)
-    settings.verify_api_key("sk-ant-ok")
+    settings.verify_api_key("sk-ant-api03-ok")
+
+
+def test_non_claude_text_is_rejected_before_calling_the_api():
+    with pytest.raises(ValueError, match="sk-ant-"):
+        settings.check_key_format("hello")
+
+
+def test_usr_style_key_is_passed_on_to_the_server():
+    settings.check_key_format("sk-ant-usr01-abc")
+
+
+def test_admin_key_gets_its_own_explanation():
+    with pytest.raises(ValueError, match="管理用"):
+        settings.check_key_format("sk-ant-admin01-abc")
+
+
+def test_api_key_format_is_accepted():
+    settings.check_key_format("sk-ant-api03-abc")
