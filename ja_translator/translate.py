@@ -98,9 +98,12 @@ class ClaudeTranslator:
         if client is None:
             import anthropic
 
-            if not os.environ.get("ANTHROPIC_API_KEY"):
-                raise RuntimeError("ANTHROPIC_API_KEY が設定されていません")
-            client = anthropic.Anthropic()
+            from .settings import get_api_key
+
+            api_key = get_api_key()
+            if not api_key:
+                raise RuntimeError("Claude API キーが設定されていません。「APIキー設定」から登録してください")
+            client = anthropic.Anthropic(api_key=api_key)
         self._client = client
         self._model = model or os.environ.get("JT_MODEL") or DEFAULT_MODEL
         self._glossary = glossary or {}

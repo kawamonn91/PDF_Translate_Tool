@@ -7,11 +7,14 @@ import tempfile
 from pathlib import Path
 
 import pymupdf as fitz
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QImage, QKeySequence, QPen, QPixmap
+from PySide6.QtCore import QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QImage, QKeySequence, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -37,6 +41,7 @@ from PySide6.QtWidgets import (
 from . import pdf_engine, pptx_engine, preview
 from .model import TextUnit
 from .project import Project
+from .settings import delete_api_key, get_api_key, key_source, save_api_key, verify_api_key
 from .translate import ClaudeTranslator
 
 RENDER_SCALE = 2.0  # プレビューの解像度(pt → ピクセルの倍率)
@@ -59,6 +64,119 @@ class Job(QThread):
             self.done.emit(self._fn())
         except Exception as e:  # 画面に理由を出すため、どんな失敗も拾う
             self.failed.emit(str(e))
+
+
+CONSOLE_KEYS_URL = "https://console.anthropic.com/settings/keys"
+
+
+class ApiKeyDialog(QDialog):
+    """初めての人でも迷わないように、取得から登録までを手順で案内する"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Claude APIキーの登録")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+
+        guide = QLabel(
+            "<b>翻訳には Claude API のキーが必要です。次の手順で登録してください。</b><br>"
+            "1. 下の「Anthropic Console を開く」を押し、Anthropic のアカウントでログインします。<br>"
+            "2. 「Create Key」(キーを作成)を押し、表示された <b>sk-ant-</b> で始まる文字列をコピーします。<br>"
+            "3. コピーした文字列を下の欄に貼り付けます(「貼り付け」ボタンでも入ります)。<br>"
+            "4. 「接続テストして保存」を押します。OK と出れば登録完了です。<br><br>"
+            "<span style='color:#666'>キーは Windows の資格情報マネージャーに暗号化して保存され、翻訳のときだけ Claude API に送られます。"
+            "API の利用料金は Anthropic の従量課金です(使った分だけ)。Console で利用上限を設定すると安心です。</span>"
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
+
+        open_row = QHBoxLayout()
+        open_btn = QPushButton("Anthropic Console を開く")
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(CONSOLE_KEYS_URL)))
+        open_row.addWidget(open_btn)
+        open_row.addStretch(1)
+        layout.addLayout(open_row)
+
+        entry_row = QHBoxLayout()
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit.setPlaceholderText("ここに sk-ant- で始まるキーを貼り付け")
+        self.edit.setClearButtonEnabled(True)
+        entry_row.addWidget(self.edit, 1)
+        paste_btn = QPushButton("貼り付け")
+        paste_btn.clicked.connect(self._paste)
+        entry_row.addWidget(paste_btn)
+        layout.addLayout(entry_row)
+
+        self.show_check = QCheckBox("キーを画面に表示する")
+        self.show_check.toggled.connect(
+            lambda on: self.edit.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password)
+        )
+        layout.addWidget(self.show_check)
+
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        buttons = QDialogButtonBox()
+        self.save_btn = buttons.addButton("接続テストして保存", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.delete_btn = buttons.addButton("保存済みのキーを削除", QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.addButton("閉じる", QDialogButtonBox.ButtonRole.RejectRole)
+        self.save_btn.clicked.connect(self._save)
+        self.delete_btn.clicked.connect(self._delete)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh_status()
+
+    def _paste(self) -> None:
+        text = QApplication.clipboard().text().strip()
+        if not text:
+            QMessageBox.information(self, "貼り付けできません", "クリップボードに文字がありません。Console でキーをコピーしてから押してください。")
+            return
+        self.edit.setText(text)
+
+    def _refresh_status(self) -> None:
+        source = key_source()
+        if source == "env":
+            text = "今は環境変数 ANTHROPIC_API_KEY のキーが使われています(こちらが優先されます)。"
+        elif source == "stored":
+            text = "登録済みです。このまま翻訳に使えます。"
+        else:
+            text = "まだ登録されていません。"
+        self.status.setText(text)
+        self.delete_btn.setEnabled(source == "stored")
+
+    def _save(self) -> None:
+        key = self.edit.text().strip()
+        if not key:
+            QMessageBox.information(self, "キーが空です", "上の欄にキーを貼り付けてから、もう一度押してください。")
+            return
+        self.save_btn.setEnabled(False)
+        self.status.setText("Claude API に接続して確かめています…")
+        QApplication.processEvents()
+        try:
+            verify_api_key(key)
+            save_api_key(key)
+        except ValueError as e:
+            QMessageBox.warning(self, "登録できませんでした", str(e))
+            self.save_btn.setEnabled(True)
+            self._refresh_status()
+            return
+        except Exception as e:
+            QMessageBox.warning(self, "登録できませんでした", f"資格情報マネージャーへの保存に失敗しました。\n{e}")
+            self.save_btn.setEnabled(True)
+            self._refresh_status()
+            return
+        self.save_btn.setEnabled(True)
+        self.edit.clear()
+        self._refresh_status()
+        QMessageBox.information(self, "登録できました", "Claude API キーを登録しました。翻訳を始められます。")
+
+    def _delete(self) -> None:
+        if QMessageBox.question(self, "削除しますか", "保存済みのキーを削除します。よろしいですか?") != QMessageBox.StandardButton.Yes:
+            return
+        delete_api_key()
+        self._refresh_status()
 
 
 class PageView(QGraphicsView):
@@ -240,6 +358,8 @@ class MainWindow(QMainWindow):
         self.translate_action = add("すべて翻訳", "Ctrl+T", self.translate_all)
         self.export_action = add("日本語版を保存", "Ctrl+S", self.export)
         tb.addSeparator()
+        add("APIキー登録", None, self.open_api_key_dialog)
+        tb.addSeparator()
         self.key_label = QLabel()
         tb.addWidget(self.key_label)
         self._refresh_key_label()
@@ -247,8 +367,19 @@ class MainWindow(QMainWindow):
     # ---------- ファイル・翻訳 ----------
 
     def _refresh_key_label(self) -> None:
-        has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-        self.key_label.setText(" 翻訳: Claude API " + ("(設定済み)" if has_key else "(APIキーが未設定です)"))
+        has_key = get_api_key() is not None
+        self.key_label.setText(" 翻訳: Claude API " + ("(登録済み)" if has_key else "(APIキーが未登録です)"))
+
+    def open_api_key_dialog(self) -> None:
+        ApiKeyDialog(self).exec()
+        self._refresh_key_label()
+
+    def _require_api_key(self) -> bool:
+        if get_api_key() is not None:
+            return True
+        QMessageBox.information(self, "APIキーの登録が必要です", "翻訳には Claude API キーが必要です。登録画面を開きますので、手順に沿って登録してください。")
+        self.open_api_key_dialog()
+        return get_api_key() is not None
 
     def _update_enabled(self) -> None:
         loaded = self.project is not None
@@ -282,12 +413,7 @@ class MainWindow(QMainWindow):
     def translate_all(self) -> None:
         if self.project is None:
             return
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            QMessageBox.information(
-                self,
-                "APIキーが必要です",
-                "翻訳には Claude API のキーが必要です。\n環境変数 ANTHROPIC_API_KEY に設定してから、もう一度開いてください。",
-            )
+        if not self._require_api_key():
             return
         self._busy(True, "翻訳しています…")
         project = self.project
@@ -433,8 +559,7 @@ class MainWindow(QMainWindow):
     def retranslate_selected(self) -> None:
         if self.project is None or self.selected_id is None:
             return
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            QMessageBox.information(self, "APIキーが必要です", "ANTHROPIC_API_KEY を設定してください。")
+        if not self._require_api_key():
             return
         unit_id = self.selected_id
         project = self.project

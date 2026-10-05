@@ -1,4 +1,4 @@
-# dist の配布フォルダを %LOCALAPPDATA%\Programs にコピーし、デスクトップにショートカットを作る
+﻿# dist の配布フォルダを %LOCALAPPDATA%\Programs にコピーし、デスクトップにショートカットを作る
 $ErrorActionPreference = "Stop"
 $source = Join-Path $PSScriptRoot "dist\PDF-JA-Translator"
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\PDF-JA-Translator"
