@@ -100,3 +100,27 @@ def test_admin_key_gets_its_own_explanation():
 
 def test_api_key_format_is_accepted():
     settings.check_key_format("sk-ant-api03-abc")
+
+
+
+def test_empty_or_whitespace_key_is_rejected():
+    with pytest.raises(ValueError, match="入力してください"):
+        settings.check_key_format("")
+    with pytest.raises(ValueError, match="入力してください"):
+        settings.check_key_format("   ")
+
+
+def test_is_valid_key_format():
+    assert settings.is_valid_key_format("sk-ant-api03-validkey123") is True
+    assert settings.is_valid_key_format("sk-ant-usr01-validkey123") is True
+    assert settings.is_valid_key_format("sk-ant-admin01-invalid") is False
+    assert settings.is_valid_key_format("not-claude-key") is False
+    assert settings.is_valid_key_format("") is False
+    assert settings.is_valid_key_format(None) is False
+
+
+def test_mask_api_key():
+    assert settings.mask_api_key("sk-ant-api03-abcdef1234") == "sk-ant-...1234"
+    assert settings.mask_api_key("sk-ant-short") == "sk-ant-***"
+    assert settings.mask_api_key("") == ""
+    assert settings.mask_api_key(None) == ""
