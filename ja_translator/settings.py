@@ -45,25 +45,6 @@ def check_key_format(key: str) -> None:
         raise ValueError("Claude API キーは sk-ant- で始まります。コピーが正しいか確認してください")
 
 
-def is_valid_key_format(key: str) -> bool:
-    """キーの形式が正しいか判定する。"""
-    try:
-        check_key_format(key)
-        return True
-    except (ValueError, TypeError):
-        return False
-
-
-def mask_api_key(key: str | None) -> str:
-    """API キーの一部をマスクして安全に表示できる文字列を返す (例: sk-ant-...1234)。"""
-    if not key or not isinstance(key, str):
-        return ""
-    stripped = key.strip()
-    if len(stripped) <= 12:
-        return "sk-ant-***"
-    return f"{stripped[:7]}...{stripped[-4:]}"
-
-
 def save_api_key(key: str) -> None:
     check_key_format(key)
     _keyring().set_password(SERVICE, ACCOUNT, key.strip())
