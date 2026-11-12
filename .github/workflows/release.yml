@@ -1,0 +1,87 @@
+# CD（デスクトップ版）。v1.2.3 の形のタグを push すると、build_portable.ps1 でポータブル版（Windows 64bit の zip）を作って
+# GitHub Releases に置く（docs/ci.md の「CD」）。
+# 手で動かした（workflow_dispatch）ときは、zip を作って確かめるまでにして、リリースは作らない（CD の動作確認用）。
+# Android 版は対象外（MuPDF のネイティブライブラリを Git に入れておらず、CI でもビルドしていないため）。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      # アクションは改ざんに備えてコミットの SHA で固定する（コメントは版）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # アプリには版の番号のファイルが無いので、タグ（v1.2.3）の形だけを確かめ、それを版にする
+      - name: 版を決める
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if ! echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::タグは v1.2.3 の形にする（実際: $GITHUB_REF_NAME）"
+              exit 1
+            fi
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      # ポータブル版に入れる Python（build_portable.ps1 の埋め込み版 3.14）と同じ版で、ライブラリの wheel を選ぶ
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: venv を作って依存を入れる
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 単体テストの実行
+        shell: pwsh
+        run: |
+          .venv\Scripts\python.exe -m pytest tests -q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: ポータブル版を作る
+        shell: pwsh
+        run: ./build_portable.ps1
+
+      # 埋め込みの Python から、アプリと同梱したライブラリが読めるか（画面は開かない）
+      - name: ポータブル版を確かめる
+        shell: pwsh
+        run: |
+          $py = "dist\PDF-JA-Translator\python\python.exe"
+          & $py -c "import ja_translator, pymupdf, pptx, anthropic, keyring, PySide6.QtWidgets; print('import ok')"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 置くものを集める
+        shell: bash
+        run: |
+          mkdir release
+          cp dist/PDF-JA-Translator-win64.zip "release/PDF-JA-Translator-$VERSION-win64.zip"
+          (cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+
+      - name: リリースを作る
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* --target "$GITHUB_SHA" --title "PDF-JA-Translator $VERSION" \
+            --notes "Windows 64bit のポータブル版（コミット $GITHUB_SHA）。zip を展開して start.bat で起動する。"
